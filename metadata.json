@@ -1,0 +1,6 @@
+{
+  "name": "Web2APK Studio Pro",
+  "description": "Professional Android Studio project generator and code exporter for websites and web apps, supporting Trusted Web Activities (TWA), WebViews, custom asset links, and instant project ZIP downloads.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
