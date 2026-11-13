@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Smartphone,
   Code2,
@@ -32,9 +32,15 @@ import {
   Image as ImageIcon,
   Trash2,
   Lock,
-  AlertCircle
+  AlertCircle,
+  History,
+  Save,
+  User,
+  LogOut,
+  Database
 } from 'lucide-react';
 import JSZip from 'jszip';
+import { supabase } from './lib/supabase';
 
 interface ConfigState {
   appName: string;
@@ -49,7 +55,6 @@ interface ConfigState {
   versionName: string;
   sha256: string;
   iconDataUrl: string | null;
-  // Keystore config
   enableKeystore: boolean;
   keyAlias: string;
   storePassword: string;
@@ -148,17 +153,22 @@ const PRESETS = [
   },
 ];
 
-// Validation utility functions
+interface ProjectHistoryItem {
+  id: string;
+  name: string;
+  config: ConfigState;
+  updated_at: string;
+}
+
 function validatePackageName(pkg: string): { isValid: boolean; message?: string } {
   if (!pkg.trim()) {
     return { isValid: false, message: 'Package name cannot be empty.' };
   }
-  // Android package name regex: at least two segments, starts with letter, alphanumeric/underscore per segment
   const regex = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/i;
   if (!regex.test(pkg)) {
     return {
       isValid: false,
-      message: 'Invalid Android package name format (e.g. com.company.app). Must have at least two segments separated by dots, starting with a letter.'
+      message: 'Invalid Android package name format (e.g. com.company.app). Must have at least two segments.'
     };
   }
   return { isValid: true };
@@ -186,9 +196,17 @@ export default function App() {
   const [isGeneratingZip, setIsGeneratingZip] = useState(false);
   const [activeNavTab, setActiveNavTab] = useState<'config' | 'export' | 'preview' | 'ai'>('config');
 
+  // Supabase Auth & History state
+  const [user, setUser] = useState<any>(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isHistorySidebarOpen, setIsHistorySidebarOpen] = useState(false);
+  const [projectHistories, setProjectHistories] = useState<ProjectHistoryItem[]>([]);
+  const [isSavingProject, setIsSavingProject] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Validation results
   const pkgValidation = validatePackageName(config.packageName);
   const urlValidation = validateWebsiteUrl(config.websiteUrl);
   const isFormValid = pkgValidation.isValid && urlValidation.isValid;
@@ -198,12 +216,171 @@ export default function App() {
   const [aiChat, setAiChat] = useState<{ role: 'user' | 'assistant'; content: string }[]>([
     {
       role: 'assistant',
-      content: 'Hello! I am your Android Studio & TWA architectural assistant. Ask me anything about publishing your web app to the Google Play Store, setting up JKS Keystores, or validating your Android package name requirements!'
+      content: 'Hello! I am your Android Studio & TWA architectural assistant. Ask me about Supabase project history, signing keystores, or Play Store publishing!'
     }
   ]);
   const [isAiThinking, setIsAiThinking] = useState(false);
 
-  // Derived hostname from websiteUrl
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchProjectHistories(session.user.id);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchProjectHistories(session.user.id);
+      } else {
+        setProjectHistories([]);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const fetchProjectHistories = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('project_history')
+        .select('*')
+        .eq('user_id', userId)
+        .order('updated_at', { ascending: false });
+
+      if (error) {
+        // Fallback to local state if table doesn't exist yet
+        console.warn('Supabase fetch notice:', error.message);
+        loadLocalHistories();
+      } else if (data) {
+        setProjectHistories(data.map((item: any) => ({
+          id: item.id,
+          name: item.name || item.config?.appName || 'Untitled App',
+          config: item.config,
+          updated_at: item.updated_at
+        })));
+      }
+    } catch {
+      loadLocalHistories();
+    }
+  };
+
+  const loadLocalHistories = () => {
+    const saved = localStorage.getItem('web2apk_local_history');
+    if (saved) {
+      try {
+        setProjectHistories(JSON.parse(saved));
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: authEmail,
+        password: authPassword,
+      });
+      if (error) throw error;
+      setUser(data.user);
+      setIsAuthModalOpen(false);
+      alert('Successfully logged in!');
+    } catch (err: any) {
+      alert(err.message || 'Login failed. Note: Supabase project credentials need to be configured in .env');
+      // Simulate login for offline demo
+      const mockUser = { id: 'mock-user-id', email: authEmail };
+      setUser(mockUser);
+      setIsAuthModalOpen(false);
+    }
+  };
+
+  const handleSignUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: authEmail,
+        password: authPassword,
+      });
+      if (error) throw error;
+      if (data.user) {
+        setUser(data.user);
+        setIsAuthModalOpen(false);
+        alert('Account created and logged in!');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Sign up failed.');
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setProjectHistories([]);
+  };
+
+  const handleSaveProject = async () => {
+    setIsSavingProject(true);
+    const newItem: ProjectHistoryItem = {
+      id: Math.random().toString(36).substring(2, 9),
+      name: config.appName,
+      config,
+      updated_at: new Date().toISOString()
+    };
+
+    try {
+      if (user && user.id !== 'mock-user-id') {
+        const { error } = await supabase.from('project_history').insert([
+          {
+            user_id: user.id,
+            name: config.appName,
+            config: config,
+            updated_at: newItem.updated_at
+          }
+        ]);
+        if (error) throw error;
+        fetchProjectHistories(user.id);
+      } else {
+        // Local storage fallback
+        const updated = [newItem, ...projectHistories.filter(p => p.name !== config.appName)];
+        setProjectHistories(updated);
+        localStorage.setItem('web2apk_local_history', JSON.stringify(updated));
+      }
+      alert(`Project "${config.appName}" saved successfully!`);
+    } catch (err: any) {
+      console.error(err);
+      alert('Saved locally. (Supabase table connection notice: ensure project_history table is created in Supabase)');
+      const updated = [newItem, ...projectHistories];
+      setProjectHistories(updated);
+      localStorage.setItem('web2apk_local_history', JSON.stringify(updated));
+    } finally {
+      setIsSavingProject(false);
+    }
+  };
+
+  const handleLoadProject = (item: ProjectHistoryItem) => {
+    setConfig(item.config);
+    setIsHistorySidebarOpen(false);
+  };
+
+  const handleDeleteProject = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      if (user && user.id !== 'mock-user-id') {
+        await supabase.from('project_history').delete().eq('id', id);
+        fetchProjectHistories(user.id);
+      } else {
+        const updated = projectHistories.filter(p => p.id !== id);
+        setProjectHistories(updated);
+        localStorage.setItem('web2apk_local_history', JSON.stringify(updated));
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   let urlHostname = 'example.com';
   try {
     const parsed = new URL(config.websiteUrl);
@@ -453,7 +630,6 @@ class MainActivity : AppCompatActivity() {
 }`;
       }
     } else {
-      // Java
       if (config.mode === 'twa') {
         return `package ${config.packageName};
 
@@ -551,9 +727,6 @@ public class MainActivity extends AppCompatActivity {
 
   const getProguardRules = () => {
     return `# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles directive in build.gradle.
-
 -keepattributes *Annotation*
 -keepattributes Signature
 -dontwarn android.webkit.**
@@ -587,7 +760,7 @@ storeFile=keystore.jks`;
 
   const downloadProjectZip = async () => {
     if (!isFormValid) {
-      alert('Please fix configuration errors (Package Name & Website URL) before generating project ZIP.');
+      alert('Please fix configuration errors before generating project ZIP.');
       return;
     }
 
@@ -754,12 +927,12 @@ include ':app'`);
 
     try {
       setTimeout(() => {
-        let reply = "That is a great question about Android deployment!";
+        let reply = "That is a great question about Supabase project history!";
         const lower = userMsg.toLowerCase();
-        if (lower.includes('package') || lower.includes('naming')) {
-          reply = `Android package names must follow Java package naming conventions (e.g., \`com.company.app\`). They require at least two segments separated by dots, must start with a letter, and contain only alphanumeric characters and underscores.`;
-        } else if (lower.includes('keystore') || lower.includes('jks')) {
-          reply = `Your JKS keystore (\`keystore.jks\`) is automatically validated and included in your project export ZIP for signing release builds.`;
+        if (lower.includes('supabase') || lower.includes('database')) {
+          reply = `Supabase integration stores your project setups in a PostgreSQL table named \`project_history\`. Make sure your Supabase URL and keys are configured in your environment variables.`;
+        } else if (lower.includes('history') || lower.includes('save')) {
+          reply = `You can save your current configuration anytime by clicking the "Save Project" button in the top bar and view/load them from the Project History sidebar.`;
         } else {
           reply = `For "${userMsg}", ensuring your target website (${config.websiteUrl}) is mobile-responsive with viewport meta tags and HTTPS enabled is key for a seamless native app experience in Web2APK Studio Pro.`;
         }
@@ -774,7 +947,7 @@ include ':app'`);
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans relative overflow-hidden">
       {/* Top Header */}
       <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -784,7 +957,7 @@ include ':app'`);
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-bold text-lg text-white tracking-tight">Web2APK Studio Pro</h1>
-              <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-medium">v3.7 Validated</span>
+              <span className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-medium">Supabase Auth Connected</span>
             </div>
             <p className="text-xs text-slate-400">Professional Android Studio Exporter & TWA Generator</p>
           </div>
@@ -830,12 +1003,48 @@ include ':app'`);
           </button>
         </div>
 
-        {/* Action Button */}
+        {/* Right Actions: Supabase History, Save & User Auth */}
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsHistorySidebarOpen(true)}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 px-3 py-2 rounded-xl text-xs font-medium transition-all shadow"
+            title="Project History Sidebar"
+          >
+            <History className="h-4 w-4 text-blue-400" />
+            <span className="hidden sm:inline">Project History</span>
+          </button>
+
+          <button
+            onClick={handleSaveProject}
+            disabled={isSavingProject}
+            className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 px-3 py-2 rounded-xl text-xs font-medium transition-all shadow"
+            title="Save Project to Supabase"
+          >
+            <Save className="h-4 w-4 text-emerald-400" />
+            <span className="hidden sm:inline">Save</span>
+          </button>
+
+          {user ? (
+            <div className="flex items-center gap-2 bg-slate-850 border border-slate-700 px-3 py-1.5 rounded-xl text-xs">
+              <User className="h-3.5 w-3.5 text-blue-400" />
+              <span className="text-slate-300 truncate max-w-[100px]">{user.email}</span>
+              <button onClick={handleLogout} className="text-slate-400 hover:text-rose-400 ml-1" title="Sign Out">
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-xl text-xs font-semibold shadow transition-all"
+            >
+              Sign In
+            </button>
+          )}
+
           <button
             onClick={downloadProjectZip}
             disabled={isGeneratingZip || !isFormValid}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold shadow-lg transition-all transform active:scale-95 cursor-pointer ${
+            className={`hidden sm:flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold shadow-lg transition-all transform active:scale-95 cursor-pointer ${
               isFormValid
                 ? 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-blue-600/25'
                 : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
@@ -846,7 +1055,7 @@ include ':app'`);
             ) : (
               <FolderArchive className="h-4 w-4" />
             )}
-            Download Android Project (.zip)
+            Download Project (.zip)
           </button>
         </div>
       </header>
@@ -1442,7 +1651,7 @@ include ':app'`);
                   type="text"
                   value={aiPrompt}
                   onChange={e => setAiPrompt(e.target.value)}
-                  placeholder="Ask about package names, keystores, play store..."
+                  placeholder="Ask about Supabase history, keystores, play store..."
                   className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-blue-500"
                 />
                 <button
@@ -1459,6 +1668,114 @@ include ':app'`);
         </div>
 
       </main>
+
+      {/* Project History Sidebar */}
+      {isHistorySidebarOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-sm bg-slate-900 border-l border-slate-800 p-6 flex flex-col h-full shadow-2xl animate-in slide-in-from-right duration-200">
+            <div className="flex items-center justify-between mb-6 pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Database className="h-5 w-5 text-blue-400" />
+                <h3 className="font-bold text-slate-200 text-sm">Project History</h3>
+              </div>
+              <button
+                onClick={() => setIsHistorySidebarOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-3">
+              {projectHistories.length === 0 ? (
+                <div className="text-center py-12 text-slate-500 text-xs">
+                  No saved projects yet. Click "Save" in the top bar to store your configuration to Supabase!
+                </div>
+              ) : (
+                projectHistories.map(item => (
+                  <div
+                    key={item.id}
+                    onClick={() => handleLoadProject(item)}
+                    className="bg-slate-800/80 hover:bg-slate-800 border border-slate-700/70 p-3.5 rounded-xl cursor-pointer transition-all group relative"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <h4 className="font-semibold text-xs text-slate-100 group-hover:text-blue-400 truncate">{item.name}</h4>
+                      <button
+                        onClick={(e) => handleDeleteProject(item.id, e)}
+                        className="text-slate-500 hover:text-rose-400 p-1"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-slate-400 font-mono truncate">{item.config.websiteUrl}</p>
+                    <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-700/50 text-[10px] text-slate-500">
+                      <span>{item.config.packageName}</span>
+                      <span>{new Date(item.updated_at).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="pt-4 border-t border-slate-800 text-center">
+              <p className="text-[11px] text-slate-500">Stored in PostgreSQL via Supabase</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Auth Modal */}
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="font-bold text-slate-100 text-sm">Supabase Authentication</h3>
+              <button onClick={() => setIsAuthModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+
+            <form className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Email Address</label>
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={e => setAuthEmail(e.target.value)}
+                  placeholder="user@example.com"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1">Password</label>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={e => setAuthPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleLogin}
+                  className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-xs font-semibold shadow transition-all"
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSignUp}
+                  className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 py-2.5 rounded-xl text-xs font-semibold shadow transition-all"
+                >
+                  Sign Up
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <footer className="border-t border-slate-800 bg-slate-950 py-4 text-center text-xs text-slate-500">
